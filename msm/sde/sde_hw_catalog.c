@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2021-2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  * Copyright (c) 2015-2021, The Linux Foundation. All rights reserved.
  */
 
@@ -3357,7 +3357,7 @@ static int sde_cdm_parse_dt(struct device_node *np,
 		/* intf3 and wb(s) for cdm block */
 		for (j = 0; j < sde_cfg->wb_count; j++)
 			cdm->wb_connect |= BIT(sde_cfg->wb[j].id);
-		cdm->intf_connect = sde_cfg->intf_count ? BIT(INTF_3) : 0;
+		cdm->intf_connect = sde_cfg->intf_count ? BIT(INTF_0) : 0;
 
 		if (IS_SDE_CTL_REV_100(sde_cfg->ctl_rev))
 			set_bit(SDE_CDM_INPUT_CTRL, &cdm->features);
@@ -5054,6 +5054,15 @@ static int _sde_hardware_pre_caps(struct sde_mdss_cfg *sde_cfg, uint32_t hw_rev)
 		sde_cfg->sui_block_xin_mask = 0xC01;
 		clear_bit(SDE_FEATURE_HDR, sde_cfg->features);
 		set_bit(SDE_FEATURE_VBIF_DISABLE_SHAREABLE, sde_cfg->features);
+	} else if (IS_KHAJE_TARGET(hw_rev)) {
+		set_bit(SDE_FEATURE_QSYNC, sde_cfg->features);
+		sde_cfg->perf.min_prefill_lines = 24;
+		sde_cfg->vbif_qos_nlvl = 8;
+		sde_cfg->ts_prefill_rev = 2;
+		sde_cfg->ctl_rev = SDE_CTL_CFG_VERSION_1_0_0;
+		sde_cfg->sui_block_xin_mask = 0xC01;
+		clear_bit(SDE_FEATURE_HDR, sde_cfg->features);
+		set_bit(SDE_FEATURE_VBIF_DISABLE_SHAREABLE, sde_cfg->features);
 	} else if (IS_LAGOON_TARGET(hw_rev)) {
 		set_bit(SDE_FEATURE_CWB, sde_cfg->features);
 		set_bit(SDE_FEATURE_QSYNC, sde_cfg->features);
@@ -5253,44 +5262,6 @@ static int _sde_hardware_pre_caps(struct sde_mdss_cfg *sde_cfg, uint32_t hw_rev)
 		sde_cfg->demura_supported[SSPP_DMA3][0] = 0;
 		sde_cfg->demura_supported[SSPP_DMA3][1] = 1;
 		sde_cfg->has_line_insertion = true;
-	} else if (IS_CROW_TARGET(hw_rev)) {
-		set_bit(SDE_FEATURE_DEDICATED_CWB, sde_cfg->features);
-		set_bit(SDE_FEATURE_CWB_DITHER, sde_cfg->features);
-		set_bit(SDE_FEATURE_WB_UBWC, sde_cfg->features);
-		set_bit(SDE_FEATURE_CWB_CROP, sde_cfg->features);
-		set_bit(SDE_FEATURE_QSYNC, sde_cfg->features);
-		set_bit(SDE_FEATURE_3D_MERGE_RESET, sde_cfg->features);
-		set_bit(SDE_FEATURE_HDR_PLUS, sde_cfg->features);
-		set_bit(SDE_FEATURE_INLINE_SKIP_THRESHOLD, sde_cfg->features);
-		set_bit(SDE_MDP_DHDR_MEMPOOL_4K, &sde_cfg->mdp[0].features);
-		set_bit(SDE_FEATURE_VIG_P010, sde_cfg->features);
-		set_bit(SDE_FEATURE_VBIF_DISABLE_SHAREABLE, sde_cfg->features);
-		set_bit(SDE_FEATURE_DITHER_LUMA_MODE, sde_cfg->features);
-		set_bit(SDE_FEATURE_MULTIRECT_ERROR, sde_cfg->features);
-		set_bit(SDE_FEATURE_FP16, sde_cfg->features);
-		set_bit(SDE_MDP_PERIPH_TOP_0_REMOVED, &sde_cfg->mdp[0].features);
-		set_bit(SDE_FEATURE_DEMURA, sde_cfg->features);
-		set_bit(SDE_FEATURE_UBWC_STATS, sde_cfg->features);
-		set_bit(SDE_FEATURE_HW_VSYNC_TS, sde_cfg->features);
-		set_bit(SDE_FEATURE_AVR_STEP, sde_cfg->features);
-		set_bit(SDE_FEATURE_VBIF_CLK_SPLIT, sde_cfg->features);
-		set_bit(SDE_FEATURE_CTL_DONE, sde_cfg->features);
-		set_bit(SDE_FEATURE_TRUSTED_VM, sde_cfg->features);
-		sde_cfg->allowed_dsc_reservation_switch = SDE_DP_DSC_RESERVATION_SWITCH;
-		sde_cfg->autorefresh_disable_seq = AUTOREFRESH_DISABLE_SEQ2;
-		sde_cfg->perf.min_prefill_lines = 40;
-		sde_cfg->vbif_qos_nlvl = 8;
-		sde_cfg->qos_target_time_ns = 11160;
-		sde_cfg->ts_prefill_rev = 2;
-		sde_cfg->ctl_rev = SDE_CTL_CFG_VERSION_1_0_0;
-		sde_cfg->true_inline_rot_rev = SDE_INLINE_ROT_VERSION_2_0_1;
-		sde_cfg->sid_rev = SDE_SID_VERSION_2_0_0;
-		sde_cfg->mdss_hw_block_size = 0x158;
-		sde_cfg->has_line_insertion = true;
-		sde_cfg->demura_supported[SSPP_DMA1][0] = 0;
-		sde_cfg->demura_supported[SSPP_DMA1][1] = 1;
-		sde_cfg->demura_supported[SSPP_DMA3][0] = 0;
-		sde_cfg->demura_supported[SSPP_DMA3][1] = 1;
 	} else {
 		SDE_ERROR("unsupported chipset id:%X\n", hw_rev);
 		sde_cfg->perf.min_prefill_lines = 0xffff;

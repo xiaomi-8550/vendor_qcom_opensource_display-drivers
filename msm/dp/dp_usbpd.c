@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2021-2022, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2023, Qualcomm Innovation Center, Inc. All rights reserved.
  * Copyright (c) 2012-2020, The Linux Foundation. All rights reserved.
  */
 
+#include <linux/err.h>
+#include <linux/device.h>
 #include <linux/usb/usbpd.h>
 #include <linux/slab.h>
-#include <linux/device.h>
 #include <linux/delay.h>
 
 #include "dp_usbpd.h"
@@ -516,10 +517,30 @@ static void dp_usbpd_wakeup_phy(struct dp_hpd *dp_hpd, bool wakeup)
 	usbpd_vdm_in_suspend(usbpd->pd, wakeup);
 }
 
+void *dp_usbpd_get_handle(struct device *dev)
+{
+	const char *pd_phandle = "qcom,dp-usbpd-detection";
+	struct usbpd *pd = NULL;
+
+	/* check if usbpd detect node is present  */
+	if (!of_parse_phandle(dev->of_node, pd_phandle, 0)) {
+		DP_DEBUG("usbpd node not found");
+		return NULL;
+	}
+
+	/* put device_node immediately, if node is present */
+	of_node_put(dev->of_node);
+
+	pd = devm_usbpd_get_by_phandle(dev, pd_phandle);
+	if (IS_ERR_OR_NULL(pd))
+		DP_DEBUG("usbpd get phandle failed (%ld)\n", PTR_ERR(pd));
+
+	return (void *)pd;
+}
+
 struct dp_hpd *dp_usbpd_get(struct device *dev, struct dp_hpd_cb *cb)
 {
 	int rc = 0;
-	const char *pd_phandle = "qcom,dp-usbpd-detection";
 	struct usbpd *pd = NULL;
 	struct dp_usbpd_private *usbpd;
 	struct dp_usbpd *dp_usbpd;
@@ -537,11 +558,16 @@ struct dp_hpd *dp_usbpd_get(struct device *dev, struct dp_hpd_cb *cb)
 		goto error;
 	}
 
-	pd = devm_usbpd_get_by_phandle(dev, pd_phandle);
-	if (IS_ERR(pd)) {
-		DP_DEBUG("usbpd phandle failed (%ld)\n", PTR_ERR(pd));
-		rc = PTR_ERR(pd);
-		goto error;
+	if (!IS_ERR_OR_NULL(cb->usbpd_handle))
+		pd = cb->usbpd_handle;
+
+	if (!pd) {
+		pd = (struct usbpd *)dp_usbpd_get_handle(dev);
+		if (IS_ERR_OR_NULL(pd)) {
+			DP_DEBUG("usbpd phandle failed with:%ld", PTR_ERR(pd));
+			rc = PTR_ERR(pd);
+			goto error;
+		}
 	}
 
 	usbpd = devm_kzalloc(dev, sizeof(*usbpd), GFP_KERNEL);

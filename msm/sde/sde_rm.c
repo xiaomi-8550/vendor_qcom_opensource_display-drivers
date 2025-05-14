@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2021-2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  * Copyright (c) 2016-2021, The Linux Foundation. All rights reserved.
  */
 
@@ -934,10 +934,13 @@ int sde_rm_init(struct sde_rm *rm,
 
 	rm->dev = dev;
 
-	if (IS_SDE_CTL_REV_100(cat->ctl_rev))
+	if (IS_SDE_CTL_REV_100(cat->ctl_rev)) {
 		rm->topology_tbl = g_top_table_v1;
-	else
+		rm->is_ctl_rev_supported = true;
+	} else {
 		rm->topology_tbl = g_top_table;
+		rm->is_ctl_rev_supported = false;
+	}
 
 	/* Some of the sub-blocks require an mdptop to be created */
 	rm->hw_mdp = sde_hw_mdptop_init(MDP_TOP, mmio, cat);
@@ -2215,6 +2218,9 @@ static int _sde_rm_get_hw_blk_for_cont_splash(struct sde_rm *rm,
 					splash_display->pipe_info.bordercolor) {
 				splash_display->lm_ids[splash_display->lm_cnt++] =
 					iter_lm.blk->id;
+				if (!(rm->is_ctl_rev_supported))
+					splash_display->lm_ids[splash_display->lm_cnt++] =
+						iter_lm.blk->id + LM_0;
 				SDE_DEBUG("lm_cnt=%d lm_id %d pipe_cnt%d\n",
 						splash_display->lm_cnt,
 						iter_lm.blk->id - LM_0,
@@ -2256,7 +2262,7 @@ int sde_rm_cont_splash_res_init(struct msm_drm_private *priv,
 	struct sde_kms *sde_kms = NULL;
 	struct sde_hw_mdp *hw_mdp;
 	struct sde_splash_display *splash_display;
-	u8 intf_sel;
+	u32 intf_sel;
 
 	if (!priv || !rm || !cat || !splash_data) {
 		SDE_ERROR("invalid input parameters\n");
@@ -2300,6 +2306,10 @@ int sde_rm_cont_splash_res_init(struct msm_drm_private *priv,
 			splash_display->cont_splash_enabled = true;
 			splash_display->ctl_ids[splash_display->ctl_cnt++] =
 				iter_c.blk->id;
+
+			if (!(rm->is_ctl_rev_supported))
+				splash_display->ctl_ids[splash_display->ctl_cnt++] =
+					iter_c.blk->id + CTL_0;
 			splash_disp_count++;
 		}
 		index++;

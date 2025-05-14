@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2021-2022, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2023, Qualcomm Innovation Center, Inc. All rights reserved.
  * Copyright (c) 2012-2021, The Linux Foundation. All rights reserved.
  */
 
@@ -157,6 +157,9 @@ static int dp_parser_misc(struct dp_parser *parser)
 			parser->l_pnswap |= (data[i] & 0x01) << i;
 	}
 
+	parser->yuv422_support = of_property_read_bool(of_node,
+				"qcom,yuv422-supported");
+
 	rc = of_property_read_u32(of_node,
 		"qcom,max-pclk-frequency-khz", &parser->max_pclk_khz);
 	if (rc)
@@ -166,6 +169,20 @@ static int dp_parser_misc(struct dp_parser *parser)
 		"qcom,max-lclk-frequency-khz", &parser->max_lclk_khz);
 	if (rc)
 		parser->max_lclk_khz = DP_MAX_LINK_CLK_KHZ;
+
+	parser->display_type = of_get_property(of_node,
+			"qcom,display-type", NULL);
+	if (!parser->display_type)
+		parser->display_type = "secondary";
+
+	parser->no_audio_support = of_property_read_bool(of_node,
+			"qcom,no-audio-support");
+
+	DP_DEBUG("Audio parsing successful. Audio support:%d\n",
+			!parser->no_audio_support);
+
+	parser->dp_cec_feature = of_property_read_bool(of_node,
+		"qcom,dp_cec_feature");
 
 	return 0;
 }
@@ -706,12 +723,22 @@ static int dp_parser_mst(struct dp_parser *parser)
 static void dp_parser_dsc(struct dp_parser *parser)
 {
 	struct device *dev = &parser->pdev->dev;
+	u32 version;
+	int rc;
 
 	parser->dsc_feature_enable = of_property_read_bool(dev->of_node,
 			"qcom,dsc-feature-enable");
 
 	parser->dsc_continuous_pps = of_property_read_bool(dev->of_node,
 			"qcom,dsc-continuous-pps");
+
+	rc = of_property_read_u32(dev->of_node,
+			"qcom,dsc-version", &version);
+	if (!rc) {
+		parser->dsc_version = version;
+		DP_DEBUG("dsc version: 0x%x",
+			parser->dsc_version);
+	}
 
 	DP_DEBUG("dsc parsing successful. dsc:%d\n",
 			parser->dsc_feature_enable);

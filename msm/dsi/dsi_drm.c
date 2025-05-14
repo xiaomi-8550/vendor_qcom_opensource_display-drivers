@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2021-2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  * Copyright (c) 2016-2021, The Linux Foundation. All rights reserved.
  */
 
@@ -57,6 +57,7 @@ static void convert_to_dsi_mode(const struct drm_display_mode *drm_mode,
 					 drm_mode->vdisplay;
 
 	dsi_mode->timing.refresh_rate = drm_mode_vrefresh(drm_mode);
+	dsi_mode->pixel_clk_khz = drm_mode->clock;
 
 	dsi_mode->timing.h_sync_polarity =
 			!!(drm_mode->flags & DRM_MODE_FLAG_PHSYNC);
@@ -343,9 +344,14 @@ static void dsi_bridge_post_disable(struct drm_bridge *bridge)
 
 	display = c_bridge->display;
 
+	if (!display) {
+		DSI_ERR("Invalid dsi display data\n");
+		return;
+	}
+
 	SDE_ATRACE_BEGIN("dsi_bridge_post_disable");
 	SDE_ATRACE_BEGIN("dsi_display_disable");
-	rc = dsi_display_disable(c_bridge->display);
+	rc = dsi_display_disable(display);
 	if (rc) {
 		DSI_ERR("[%d] DSI display disable failed, rc=%d\n",
 		       c_bridge->id, rc);
@@ -357,7 +363,7 @@ static void dsi_bridge_post_disable(struct drm_bridge *bridge)
 	if (display && display->drm_conn)
 		sde_connector_helper_bridge_post_disable(display->drm_conn);
 
-	rc = dsi_display_unprepare(c_bridge->display);
+	rc = dsi_display_unprepare(display);
 	if (rc) {
 		DSI_ERR("[%d] DSI display unprepare failed, rc=%d\n",
 		       c_bridge->id, rc);
@@ -365,6 +371,13 @@ static void dsi_bridge_post_disable(struct drm_bridge *bridge)
 		return;
 	}
 	SDE_ATRACE_END("dsi_bridge_post_disable");
+
+	if (display->ctrl_count != display->boot_ctrl_count) {
+		display->ctrl_count = display->boot_ctrl_count;
+		dsi_display_clk_mngr_update_ctrl_count(display->clk_mngr,
+				display->ctrl_count);
+	}
+
 }
 
 static void dsi_bridge_mode_set(struct drm_bridge *bridge,
@@ -413,6 +426,19 @@ static void dsi_bridge_mode_set(struct drm_bridge *bridge,
 	if (rc) {
 		DSI_ERR("[%s] bit clk rate cannot be restored\n", display->name);
 		return;
+	}
+
+	if (display->panel->host_config.ext_bridge_dynamic_mode_set) {
+		if (mode->hdisplay == 0 || mode->vdisplay == 0)
+			display->ctrl_count = display->boot_ctrl_count;
+		else {
+			if (mode->hdisplay <= 720 && mode->vdisplay <= 576)
+				display->ctrl_count = 1;
+			else
+				display->ctrl_count = display->boot_ctrl_count;
+		}
+		dsi_display_clk_mngr_update_ctrl_count(display->clk_mngr,
+			display->ctrl_count);
 	}
 
 	DSI_DEBUG("clk_rate: %llu\n", c_bridge->dsi_mode.timing.clk_rate_hz);
@@ -925,6 +951,8 @@ int dsi_conn_set_info_blob(struct drm_connector *connector,
 	bpp = dsi_ctrl_pixel_format_to_bpp(fmt);
 
 	sde_kms_info_add_keyint(info, "bit_depth", bpp);
+	if (dsi_display->panel->host_config.ext_bridge_hpd_en)
+		sde_kms_info_add_keystr(info, "ext bridge hpd support", "true");
 
 end:
 	return 0;
@@ -1248,6 +1276,7 @@ enum drm_mode_status dsi_conn_mode_valid(struct drm_connector *connector,
 	struct dsi_display_mode *full_dsi_mode = NULL;
 	struct sde_connector_state *conn_state;
 	int rc;
+	struct dsi_display *dsi_display = display;
 
 	if (!connector || !mode) {
 		DSI_ERR("Invalid params\n");
@@ -1256,18 +1285,24 @@ enum drm_mode_status dsi_conn_mode_valid(struct drm_connector *connector,
 
 	convert_to_dsi_mode(mode, &dsi_mode);
 
-	conn_state = to_sde_connector_state(connector->state);
-	if (conn_state)
-		msm_parse_mode_priv_info(&conn_state->msm_mode, &dsi_mode);
+	if (dsi_display->panel->num_timing_nodes) {
+		conn_state = to_sde_connector_state(connector->state);
+		if (conn_state)
+			msm_parse_mode_priv_info(&conn_state->msm_mode, &dsi_mode);
 
-	rc = dsi_display_find_mode(display, &dsi_mode, NULL, &full_dsi_mode);
-	if (rc) {
-		DSI_ERR("could not find mode %s\n", mode->name);
-		return MODE_ERROR;
+		rc = dsi_display_find_mode(display, &dsi_mode, NULL, &full_dsi_mode);
+		if (rc) {
+			DSI_ERR("could not find mode %s\n", mode->name);
+			return MODE_ERROR;
+		}
+
+		rc = dsi_display_validate_mode(display, full_dsi_mode,
+				DSI_VALIDATE_FLAG_ALLOW_ADJUST);
+	} else {
+		rc = dsi_display_validate_mode(display, &dsi_mode,
+				DSI_VALIDATE_FLAG_ALLOW_ADJUST);
 	}
 
-	rc = dsi_display_validate_mode(display, full_dsi_mode,
-			DSI_VALIDATE_FLAG_ALLOW_ADJUST);
 	if (rc) {
 		DSI_ERR("mode not supported, rc=%d\n", rc);
 		return MODE_BAD;

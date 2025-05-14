@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Copyright (c) 2021-2022 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  * Copyright (c) 2016-2021, The Linux Foundation. All rights reserved.
  */
 
@@ -87,6 +87,22 @@ struct sde_connector_ops {
 	int (*get_modes)(struct drm_connector *connector,
 			void *display,
 			const struct msm_resource_caps_info *avail_res);
+
+	/**
+	 * mode_needs_full_range - does the mode need full range
+	 * quantization
+	 * @display: Pointer to display structure
+	 * Returns: true or false based on whether full range is needed
+	 */
+	bool (*mode_needs_full_range)(void *display);
+
+	/**
+	 * get_yuv_support - is yuv supported for the given sink
+	 * device, based on the requirement
+	 * @display: Pointer to display structure
+	 * Returns: true or false based on the support.
+	 */
+	bool (*get_yuv_support)(void *display);
 
 	/**
 	 * update_pps - update pps command for the display panel
@@ -223,6 +239,16 @@ struct sde_connector_ops {
 	 * @enable: State of clks
 	 */
 	int (*clk_ctrl)(void *handle, u32 type, u32 state);
+
+	/**
+	 * get_csc_type - returns the CSC type to be used
+	 * by the CDM block based on HDR state
+	 * @connector: Pointer to drm connector structure
+	 * @display: Pointer to private display structure
+	 * Returns: type of CSC matrix to be used
+	 */
+	enum sde_csc_type (*get_csc_type)(struct drm_connector *connector,
+		void *display);
 
 	/**
 	 * set_power - update dpms setting
@@ -560,6 +586,7 @@ struct sde_misr_sign {
  * @cached_edid: cached edid data for the connector
  * @misr_event_notify_enabled: Flag to indicate if misr event notify is enabled or not
  * @previous_misr_sign: store previous misr signature
+ * @colorspace: store previous colorspace
  * @hwfence_wb_retire_fences_enable: enable hw-fences for wb retire-fence
  */
 struct sde_connector {
@@ -622,6 +649,7 @@ struct sde_connector {
 	bool hdr_supported;
 
 	u32 color_enc_fmt;
+	u32 colorspace;
 	u32 lm_mask;
 
 	u8 hdr_plus_app_ver;
@@ -642,6 +670,8 @@ struct sde_connector {
 	struct sde_misr_sign previous_misr_sign;
 
 	bool hwfence_wb_retire_fences_enable;
+	bool rgb_qs;
+	bool yuv_qs;
 
 	/* xiaomi add */
 	struct mi_sde_cdev *mi_cdev;
@@ -831,6 +861,30 @@ static inline uint64_t sde_connector_get_topology_name(
 	return sde_connector_get_property(connector->state,
 			CONNECTOR_PROP_TOPOLOGY_NAME);
 }
+
+/**
+ * sde_connector_mode_needs_full_range - query quantization type
+ * for the connector mode
+ * @connector: pointer to sde connector object
+ * Returns: true or false based on connector mode
+ */
+bool sde_connector_mode_needs_full_range(struct drm_connector *connector);
+
+/**
+ * sde_connector_mode_is_cea_mode - query if this mode is CE or IT
+ * video format
+ * @connector: pointer to drm connector object
+ * Returns: true of false based on CE or IT video format mode
+ */
+bool sde_connector_mode_is_cea_mode(struct drm_connector *connector);
+
+/**
+ * sde_connector_get_csc_type - query csc type
+ * to be used for the connector
+ * @connector: Pointer to drm connector object
+ * Returns: csc type based on connector HDR state
+ */
+enum sde_csc_type sde_connector_get_csc_type(struct drm_connector *conn);
 
 /**
  * sde_connector_get_old_topology_name - helper accessor to retrieve
@@ -1285,7 +1339,8 @@ static inline bool sde_connector_is_dualpipe_3d_merge_enabled(
 	return false;
 }
 
-static inline bool sde_connector_is_3d_merge_enabled(struct drm_connector_state *conn_state)
+static inline bool sde_connector_is_3d_merge_enabled(
+		struct drm_connector_state *conn_state)
 {
 	return sde_connector_is_dualpipe_3d_merge_enabled(conn_state)
 		|| sde_connector_is_quadpipe_3d_merge_enabled(conn_state);
@@ -1361,6 +1416,7 @@ void sde_connector_helper_bridge_enable(struct drm_connector *connector);
  */
 int sde_connector_get_panel_vfp(struct drm_connector *connector,
 	struct drm_display_mode *mode);
+
 /**
  * sde_connector_esd_status - helper function to check te status
  * @connector: Pointer to DRM connector object
@@ -1379,5 +1435,11 @@ void _sde_connector_report_panel_dead(struct sde_connector *conn,
  * @Return: line insertion support status
  */
 bool sde_connector_is_line_insertion_supported(struct sde_connector *sde_conn);
+
+/**
+ * sde_connector_set_colorspace - sets colorspace on the connector
+ * @connector: pointer to SDE connector object
+ */
+void sde_connector_set_colorspace(struct sde_connector *connector);
 
 #endif /* _SDE_CONNECTOR_H_ */

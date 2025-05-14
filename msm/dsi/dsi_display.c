@@ -760,7 +760,7 @@ static void dsi_display_set_cmd_tx_ctrl_flags(struct dsi_display *display,
 		flags = DSI_CTRL_CMD_FETCH_MEMORY;
 		if (ctrl->ctrl->secure_mode) {
 			flags &= ~DSI_CTRL_CMD_FETCH_MEMORY;
-			flags |= DSI_CTRL_CMD_FIFO_STORE;
+			flags &= ~DSI_CTRL_CMD_FETCH_MEMORY;
 		} else if (msg->tx_len > DSI_EMBEDDED_MODE_DMA_MAX_SIZE_BYTES) {
 			flags |= DSI_CTRL_CMD_NON_EMBEDDED_MODE;
 		}
@@ -2195,7 +2195,7 @@ static void adjust_timing_by_ctrl_count(const struct dsi_display *display,
 		mode->timing.h_skew /= sublinks_count;
 		mode->pixel_clk_khz /= sublinks_count;
 	} else {
-		if (mode->priv_info->dsc_enabled)
+		if (mode->priv_info && mode->priv_info->dsc_enabled)
 			mode->priv_info->dsc.config.pic_width =
 				mode->timing.h_active;
 		mode->timing.h_active /= display->ctrl_count;
@@ -4227,6 +4227,8 @@ static int dsi_display_parse_dt(struct dsi_display *display)
 
 	display->ctrl_count = dsi_display_get_phandle_count(display,
 					dsi_ctrl_name);
+	display->boot_ctrl_count = display->ctrl_count;
+
 	phy_count = dsi_display_get_phandle_count(display, dsi_phy_name);
 
 	DSI_DEBUG("ctrl count=%d, phy count=%d\n",
@@ -6062,15 +6064,25 @@ static int dsi_display_init(struct dsi_display *display)
 		if (rc) {
 			DSI_ERR("[%s] failed to enable vregs, rc=%d\n",
 					display->panel->name, rc);
-			return rc;
+			goto vreg_fail;
 		}
 	}
 
 	rc = component_add(&pdev->dev, &dsi_display_comp_ops);
-	if (rc)
+	if (rc) {
 		DSI_ERR("component add failed, rc=%d\n", rc);
+		goto comp_add_fail;
+	}
 
 	DSI_DEBUG("component add success: %s\n", display->name);
+	return rc;
+
+comp_add_fail:
+	if (display->panel)
+		dsi_pwr_enable_regulator(&display->panel->power_info, false);
+vreg_fail:
+	_dsi_display_dev_deinit(display);
+
 end:
 	return rc;
 }
@@ -6451,6 +6463,9 @@ static int dsi_display_ext_get_info(struct drm_connector *connector,
 		return -EINVAL;
 	}
 
+	if (display->panel->num_timing_nodes)
+		return dsi_display_get_info(connector, info, disp);
+
 	mutex_lock(&display->display_lock);
 
 	memset(info, 0, sizeof(struct msm_display_info));
@@ -6481,14 +6496,22 @@ static int dsi_display_ext_get_mode_info(struct drm_connector *connector,
 	void *display, const struct msm_resource_caps_info *avail_res)
 {
 	struct msm_display_topology *topology;
+	struct dsi_display *ext_display = (struct dsi_display *)display;
 
 	if (!drm_mode || !mode_info ||
 			!avail_res || !avail_res->max_mixer_width)
 		return -EINVAL;
 
+	if (ext_display->panel->num_timing_nodes)
+		return dsi_conn_get_mode_info(connector, drm_mode, sub_mode,
+			mode_info, display, avail_res);
+
 	memset(mode_info, 0, sizeof(*mode_info));
 	mode_info->frame_rate = drm_mode_vrefresh(drm_mode);
 	mode_info->vtotal = drm_mode->vtotal;
+	mode_info->comp_info.comp_type = MSM_DISPLAY_COMPRESSION_NONE;
+	if (!ext_display->panel->num_timing_nodes)
+		mode_info->no_panel_timing_node = 1;
 
 	topology = &mode_info->topology;
 	topology->num_lm = (avail_res->max_mixer_width
@@ -6497,6 +6520,24 @@ static int dsi_display_ext_get_mode_info(struct drm_connector *connector,
 	topology->num_intf = topology->num_lm;
 
 	mode_info->comp_info.comp_type = MSM_DISPLAY_COMPRESSION_NONE;
+	if (ext_display->panel->host_config.ext_bridge_custom_topology) {
+		u32 num_lm = topology->num_lm;
+		u32 ctrl_count = ext_display->ctrl_count;
+
+		if (drm_mode->hdisplay == 720 &&
+				drm_mode->vdisplay == 480) {
+			/* no need to change topology */
+		} else {
+			topology->num_lm =
+				(num_lm >= ctrl_count) ? num_lm : ctrl_count;
+			topology->num_enc = 0;
+			topology->num_intf = ctrl_count;
+		}
+	}
+
+	DSI_DEBUG("%dx%d : %d %d %d\n",
+		drm_mode->hdisplay, drm_mode->vdisplay,
+		topology->num_lm, topology->num_enc, topology->num_intf);
 
 	return 0;
 }
@@ -7480,6 +7521,11 @@ int dsi_display_get_panel_vfp(void *dsi_display,
 	mutex_lock(&display->display_lock);
 
 	count = display->panel->num_display_modes;
+	if (!count && display->ext_conn) {
+		mutex_unlock(&display->display_lock);
+		DSI_DEBUG("external bridge did not have timing node\n");
+		return -EPERM;
+	}
 
 	if (display->panel->cur_mode)
 		refresh_rate = display->panel->cur_mode->timing.refresh_rate;
@@ -7930,6 +7976,7 @@ int dsi_display_set_mode(struct dsi_display *display,
 			 u32 flags)
 {
 	int rc = 0;
+	u64 clock_rate_hz = 0;
 	struct dsi_display_mode adj_mode;
 	struct dsi_mode_info timing;
 	int fps, ddic_mode, ddic_min_fps;
@@ -7968,13 +8015,18 @@ int dsi_display_set_mode(struct dsi_display *display,
 		goto error;
 	}
 
+	if (!display->panel->dyn_clk_caps.dyn_clk_support)
+		clock_rate_hz = adj_mode.pixel_clk_khz * display->ctrl_count * 1000;
+	else
+		clock_rate_hz = adj_mode.priv_info->clk_rate_hz;
+
 	DSI_INFO("mdp_transfer_time=%d, hactive=%d, vactive=%d, fps=%d, clk_rate=%llu\n",
 			adj_mode.priv_info->mdp_transfer_time_us,
 			timing.h_active, timing.v_active, timing.refresh_rate,
-			adj_mode.priv_info->clk_rate_hz);
+			clock_rate_hz);
 	SDE_EVT32(adj_mode.priv_info->mdp_transfer_time_us,
 			timing.h_active, timing.v_active, timing.refresh_rate,
-			adj_mode.priv_info->clk_rate_hz);
+			clock_rate_hz);
 
 	if (timing.h_skew) {
 		ddic_mode = timing.h_skew >> 14;

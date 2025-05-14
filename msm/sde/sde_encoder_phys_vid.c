@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2021-2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  * Copyright (c) 2015-2021, The Linux Foundation. All rights reserved.
  */
 
@@ -634,6 +634,8 @@ static void sde_encoder_phys_vid_mode_set(
 		return;
 	}
 
+	phys_enc->hw_ctl = NULL;
+
 	rm = &phys_enc->sde_kms->rm;
 	vid_enc = to_sde_encoder_phys_vid(phys_enc);
 
@@ -681,6 +683,22 @@ static void sde_encoder_phys_vid_mode_set(
 
 	phys_enc->kickoff_timeout_ms =
 		sde_encoder_helper_get_kickoff_timeout_ms(phys_enc->parent);
+
+	/* CDM is optional */
+	if (phys_enc->cdm_capable) {
+		sde_rm_init_hw_iter(&iter, phys_enc->parent->base.id, SDE_HW_BLK_CDM);
+		for (i = 0; i <= instance; i++) {
+			sde_rm_get_hw(rm, &iter);
+			if (i == instance)
+				phys_enc->hw_cdm = (struct sde_hw_cdm *)iter.hw;
+		}
+
+		if (IS_ERR_OR_NULL(phys_enc->hw_cdm)) {
+			SDE_ERROR_VIDENC(vid_enc, "CDM required but not allted: %ld\n",
+				PTR_ERR(phys_enc->hw_cdm));
+			phys_enc->hw_cdm = NULL;
+		}
+	}
 }
 
 static int sde_encoder_phys_vid_control_vblank_irq(
@@ -779,6 +797,10 @@ static void sde_encoder_phys_vid_enable(struct sde_encoder_phys *phys_enc)
 	struct sde_encoder_phys_vid *vid_enc;
 	struct sde_hw_intf *intf;
 	struct sde_hw_ctl *ctl;
+	struct sde_hw_cdm *hw_cdm;
+	struct drm_display_mode mode;
+	bool cdm_enable = false;
+	const struct sde_format *fmt = NULL;
 
 	if (!phys_enc || !phys_enc->parent || !phys_enc->parent->dev ||
 			!phys_enc->parent->dev->dev_private ||
@@ -786,7 +808,12 @@ static void sde_encoder_phys_vid_enable(struct sde_encoder_phys *phys_enc)
 		SDE_ERROR("invalid encoder/device\n");
 		return;
 	}
+
+	cdm_enable = phys_enc->cdm_capable;
+
 	priv = phys_enc->parent->dev->dev_private;
+	hw_cdm = phys_enc->hw_cdm;
+	mode = phys_enc->cached_mode;
 
 	vid_enc = to_sde_encoder_phys_vid(phys_enc);
 	intf = phys_enc->hw_intf;
@@ -835,11 +862,31 @@ static void sde_encoder_phys_vid_enable(struct sde_encoder_phys *phys_enc)
 		goto skip_flush;
 	}
 
+	if (mode.flags & MSM_MODE_FLAG_COLOR_FORMAT_YCBCR422)
+		fmt = sde_get_sde_format(DRM_FORMAT_NV61);
+	else if (mode.flags & MSM_MODE_FLAG_COLOR_FORMAT_RGB444)
+		fmt = sde_get_sde_format(DRM_FORMAT_RGB888);
+
+	if (fmt && cdm_enable) {
+		struct sde_rect hdmi_roi;
+
+		hdmi_roi.w = mode.hdisplay;
+		hdmi_roi.h = mode.vdisplay;
+		sde_encoder_phys_setup_cdm(phys_enc, fmt,
+			CDM_CDWN_OUTPUT_HDMI, &hdmi_roi);
+		SDE_ERROR("fmt bpp: %u, fmt chrom_sample_type: 0x%x", fmt->bpp,
+				fmt->chroma_sample);
+	}
+
+	if (ctl->ops.update_bitmask && hw_cdm && cdm_enable)
+		ctl->ops.update_bitmask(ctl, SDE_HW_FLUSH_CDM, hw_cdm->idx, 1);
+
 	ctl->ops.update_bitmask(ctl, SDE_HW_FLUSH_INTF, intf->idx, 1);
 
-	if (phys_enc->hw_pp->merge_3d)
+	if (phys_enc->hw_pp->merge_3d) {
 		ctl->ops.update_bitmask(ctl, SDE_HW_FLUSH_MERGE_3D,
 			phys_enc->hw_pp->merge_3d->idx, 1);
+	}
 
 	if (phys_enc->hw_intf->cap->type == INTF_DP &&
 		phys_enc->comp_type == MSM_DISPLAY_COMPRESSION_DSC &&
@@ -867,6 +914,7 @@ static void sde_encoder_phys_vid_destroy(struct sde_encoder_phys *phys_enc)
 	}
 
 	vid_enc = to_sde_encoder_phys_vid(phys_enc);
+	sde_encoder_phys_destroy_cdm(phys_enc);
 	SDE_DEBUG_VIDENC(vid_enc, "\n");
 	kfree(vid_enc);
 }
@@ -884,14 +932,16 @@ static void sde_encoder_phys_vid_get_hw_resources(
 		return;
 	}
 
+	vid_enc = to_sde_encoder_phys_vid(phys_enc);
+
 	if ((phys_enc->intf_idx - INTF_0) >= INTF_MAX) {
 		SDE_ERROR("invalid intf idx:%d\n", phys_enc->intf_idx);
 		return;
 	}
 
-	vid_enc = to_sde_encoder_phys_vid(phys_enc);
-	SDE_DEBUG_VIDENC(vid_enc, "\n");
 	hw_res->intfs[phys_enc->intf_idx - INTF_0] = INTF_MODE_VIDEO;
+	hw_res->needs_cdm = phys_enc->cdm_capable;
+	SDE_DEBUG_VIDENC(vid_enc, "needs_cdm=%d\n", hw_res->needs_cdm);
 }
 
 static int _sde_encoder_phys_vid_wait_for_vblank(
@@ -1186,6 +1236,10 @@ static void sde_encoder_phys_vid_disable(struct sde_encoder_phys *phys_enc)
 	}
 
 	sde_encoder_helper_phys_disable(phys_enc, NULL);
+	if (phys_enc->hw_cdm && phys_enc->hw_cdm->ops.disable) {
+		SDE_DEBUG_DRIVER("[cdm_disable]\n");
+		phys_enc->hw_cdm->ops.disable(phys_enc->hw_cdm);
+	}
 exit:
 	SDE_EVT32(DRMID(phys_enc->parent),
 		atomic_read(&phys_enc->pending_retire_fence_cnt));
@@ -1319,6 +1373,37 @@ static void sde_encoder_phys_vid_irq_control(struct sde_encoder_phys *phys_enc,
 	}
 }
 
+static void sde_encoder_phys_vid_update_split_role(
+		struct sde_encoder_phys *phys_enc,
+		enum sde_enc_split_role role)
+{
+	struct sde_encoder_phys_vid *vid_enc;
+	enum sde_enc_split_role old_role;
+	bool is_ppsplit;
+
+	if (!phys_enc)
+		return;
+
+	vid_enc = to_sde_encoder_phys_vid(phys_enc);
+	old_role = phys_enc->split_role;
+	is_ppsplit = _sde_encoder_phys_is_ppsplit(phys_enc);
+
+	phys_enc->split_role = role;
+
+	SDE_DEBUG_VIDENC(vid_enc, "old role %d new role %d\n",
+		old_role, role);
+
+	/*
+	 * ppsplit solo needs to reprogram because intf may have swapped without
+	 * role changing on left-only, right-only back-to-back commits
+	 */
+	if (!(is_ppsplit && role == ENC_ROLE_SOLO) &&
+		(role == old_role || role == ENC_ROLE_SKIP))
+		return;
+
+	sde_encoder_helper_split_config(phys_enc, phys_enc->intf_idx);
+}
+
 static int sde_encoder_phys_vid_get_line_count(
 		struct sde_encoder_phys *phys_enc)
 {
@@ -1431,6 +1516,7 @@ static void sde_encoder_phys_vid_init_ops(struct sde_encoder_phys_ops *ops)
 	ops->wait_for_vblank = sde_encoder_phys_vid_wait_for_vblank_no_notify;
 	ops->wait_for_tx_complete = sde_encoder_phys_vid_wait_for_vblank;
 	ops->irq_control = sde_encoder_phys_vid_irq_control;
+	ops->update_split_role = sde_encoder_phys_vid_update_split_role;
 	ops->prepare_for_kickoff = sde_encoder_phys_vid_prepare_for_kickoff;
 	ops->handle_post_kickoff = sde_encoder_phys_vid_handle_post_kickoff;
 	ops->needs_single_flush = sde_encoder_phys_needs_single_flush;
@@ -1524,6 +1610,5 @@ fail:
 	SDE_ERROR("failed to create encoder\n");
 	if (vid_enc)
 		sde_encoder_phys_vid_destroy(phys_enc);
-
 	return ERR_PTR(ret);
 }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
  */
 
@@ -347,6 +347,10 @@ static bool dp_mst_bridge_mode_fixup(struct drm_bridge *drm_bridge,
 	dp->convert_to_dp_mode(dp, bridge_state->dp_panel, mode, &dp_mode);
 	dp->clear_reservation(dp, bridge_state->dp_panel);
 	convert_to_drm_mode(&dp_mode, adjusted_mode);
+	adjusted_mode->flags |=
+		dp_connector_choose_best_format(dp, adjusted_mode);
+	if (adjusted_mode->flags & MSM_MODE_FLAG_COLOR_FORMAT_YCBCR422)
+		dp->yuv422_enable = true;
 
 	DP_MST_DEBUG("mst bridge [%d] mode:%s fixup\n", bridge->id, mode->name);
 end:
@@ -1027,12 +1031,14 @@ enum drm_mode_status dp_mst_connector_mode_valid(
 	struct dp_mst_bridge_state *dp_bridge_state;
 	int i, vrefresh, slots_in_use = 0, active_enc_cnt = 0;
 	const u32 tot_slots = 63;
+	int rc = MODE_BAD;
 
 	if (!connector || !mode || !display) {
 		DP_ERR("invalid input\n");
 		return 0;
 	}
 
+	DP_MST_DEBUG_V("+\n");
 	mst = dp_display->dp_mst_prv_info;
 	c_conn = to_sde_connector(connector);
 	mst_port = c_conn->mst_port;
@@ -1078,10 +1084,13 @@ enum drm_mode_status dp_mst_connector_mode_valid(
 		DP_DEBUG("mode:%s not supported. pbn %d vs %d slots %d vs %d\n",
 				mode->name, required_pbn, full_pbn,
 				required_slots, available_slots);
+		dp_display_clear_dsc_resources(dp_display, dp_panel);
 		return MODE_BAD;
 	}
 
-	return dp_display->validate_mode(dp_display, dp_panel, mode, avail_res);
+	rc = dp_display->validate_mode(dp_display, dp_panel, mode, avail_res);
+	DP_DEBUG("- ret: %d", rc);
+	return rc;
 }
 
 int dp_mst_connector_get_mode_info(struct drm_connector *connector,

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  * Copyright (c) 2014-2021, The Linux Foundation. All rights reserved.
  * Copyright (C) 2013 Red Hat
  * Author: Rob Clark <robdclark@gmail.com>
@@ -1943,6 +1943,7 @@ static int _sde_kms_setup_displays(struct drm_device *dev,
 		.set_submode_info = dsi_conn_set_submode_blob_info,
 		.get_num_lm_from_mode = dsi_conn_get_lm_from_mode,
 		.update_transfer_time = dsi_display_update_transfer_time,
+		.get_yuv_support = NULL,
 	};
 	static const struct sde_connector_ops wb_ops = {
 		.post_init =    sde_wb_connector_post_init,
@@ -1964,8 +1965,10 @@ static int _sde_kms_setup_displays(struct drm_device *dev,
 		.set_dyn_bit_clk = NULL,
 		.set_allowed_mode_switch = NULL,
 		.update_transfer_time = NULL,
+		.get_yuv_support = NULL,
 	};
 	static const struct sde_connector_ops dp_ops = {
+		.set_info_blob = dp_connnector_set_info_blob,
 		.post_init  = dp_connector_post_init,
 		.detect     = dp_connector_detect,
 		.get_modes  = dp_connector_get_modes,
@@ -1974,6 +1977,7 @@ static int _sde_kms_setup_displays(struct drm_device *dev,
 		.get_info   = dp_connector_get_info,
 		.get_mode_info  = dp_connector_get_mode_info,
 		.post_open  = dp_connector_post_open,
+		.mode_needs_full_range = dp_connector_mode_needs_full_range,
 		.check_status = NULL,
 		.set_colorspace = dp_connector_set_colorspace,
 		.config_hdr = dp_connector_config_hdr,
@@ -1987,7 +1991,10 @@ static int _sde_kms_setup_displays(struct drm_device *dev,
 		.set_allowed_mode_switch = NULL,
 		.set_dyn_bit_clk = NULL,
 		.update_transfer_time = NULL,
+		.get_csc_type = dp_connector_get_csc_type,
+		.get_yuv_support = dp_connector_yuv_support,
 	};
+
 	struct msm_display_info info;
 	struct drm_encoder *encoder;
 	void *display, *connector;
@@ -2042,13 +2049,14 @@ static int _sde_kms_setup_displays(struct drm_device *dev,
 				&wb_ops,
 				DRM_CONNECTOR_POLL_HPD,
 				DRM_MODE_CONNECTOR_VIRTUAL);
-		if (connector) {
+		if (!IS_ERR_OR_NULL(connector)) {
 			priv->encoders[priv->num_encoders++] = encoder;
 			priv->connectors[priv->num_connectors++] = connector;
 		} else {
 			SDE_ERROR("wb %d connector init failed\n", i);
 			sde_wb_drm_deinit(display);
 			sde_encoder_destroy(encoder);
+			continue;
 		}
 	}
 
@@ -2085,7 +2093,7 @@ static int _sde_kms_setup_displays(struct drm_device *dev,
 					&dsi_ops,
 					DRM_CONNECTOR_POLL_HPD,
 					DRM_MODE_CONNECTOR_DSI);
-		if (connector) {
+		if (!IS_ERR_OR_NULL(connector)) {
 			priv->encoders[priv->num_encoders++] = encoder;
 			priv->connectors[priv->num_connectors++] = connector;
 		} else {
@@ -2102,6 +2110,7 @@ static int _sde_kms_setup_displays(struct drm_device *dev,
 			dsi_display_drm_bridge_deinit(display);
 			sde_connector_destroy(connector);
 			sde_encoder_destroy(encoder);
+			continue;
 		}
 
 		dsc_count += info.dsc_count;
@@ -2161,13 +2170,14 @@ static int _sde_kms_setup_displays(struct drm_device *dev,
 					&dp_ops,
 					DRM_CONNECTOR_POLL_HPD,
 					DRM_MODE_CONNECTOR_DisplayPort);
-		if (connector) {
+		if (!IS_ERR_OR_NULL(connector)) {
 			priv->encoders[priv->num_encoders++] = encoder;
 			priv->connectors[priv->num_connectors++] = connector;
 		} else {
 			SDE_ERROR("dp %d connector init failed\n", i);
 			dp_drm_bridge_deinit(display);
 			sde_encoder_destroy(encoder);
+			continue;
 		}
 
 		/* update display cap to MST_MODE for DP MST encoders */
@@ -3788,18 +3798,29 @@ static int sde_kms_cont_splash_config(struct msm_kms *kms,
 			mutex_unlock(&dev->mode_config.mutex);
 			return -EINVAL;
 		}
-		mutex_unlock(&dev->mode_config.mutex);
 
 		crtc->state->encoder_mask = drm_encoder_mask(encoder);
 		crtc->state->connector_mask = drm_connector_mask(connector);
 		connector->state->crtc = crtc;
 
-		drm_mode = _sde_kms_get_splash_mode(sde_kms, connector, state);
+		/* get supported modes in case of external bridge panels*/
+		if (!dsi_display->panel->num_timing_nodes) {
+			connector->funcs->fill_modes(connector,
+					dev->mode_config.max_width,
+					dev->mode_config.max_height);
+
+			drm_mode = list_first_entry(&connector->modes,
+					struct drm_display_mode, head);
+		} else
+			drm_mode = _sde_kms_get_splash_mode(sde_kms, connector, state);
+
+		mutex_unlock(&dev->mode_config.mutex);
 		if (!drm_mode) {
 			SDE_ERROR("drm_mode not found; handoff_type:%d\n",
 					sde_kms->splash_data.type);
 			return -EINVAL;
 		}
+
 		SDE_DEBUG(
 		  "drm_mode->name:%s, type:0x%x, flags:0x%x, handoff_type:%d\n",
 				drm_mode->name, drm_mode->type,

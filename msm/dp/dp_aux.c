@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2021-2023, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  * Copyright (c) 2012-2021, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/delay.h>
+#include <linux/usb/usbpd.h>
 
 #if IS_ENABLED(CONFIG_QCOM_FSA4480_I2C)
 #include <linux/soc/qcom/fsa4480-i2c.h>
@@ -660,6 +661,9 @@ static void dp_aux_init(struct dp_aux *dp_aux, struct dp_aux_cfg *aux_cfg)
 	atomic_set(&aux->aborted, 0);
 	aux->retry_cnt = 0;
 	aux->enabled = true;
+
+	if (aux->dp_aux.dp_cec_feature)
+		drm_dp_cec_register_connector(&aux->drm_aux, dp_aux->connector);
 }
 
 static void dp_aux_deinit(struct dp_aux *dp_aux)
@@ -684,6 +688,9 @@ static void dp_aux_deinit(struct dp_aux *dp_aux)
 	atomic_set(&aux->aborted, 1);
 	aux->catalog->enable(aux->catalog, false);
 	aux->enabled = false;
+
+	if (aux->dp_aux.dp_cec_feature)
+		drm_dp_cec_unregister_connector(&aux->drm_aux);
 }
 
 static int dp_aux_register(struct dp_aux *dp_aux, struct drm_device *drm_dev)
@@ -778,8 +785,13 @@ static int dp_aux_configure_fsa_switch(struct dp_aux *dp_aux,
 	aux = container_of(dp_aux, struct dp_aux_private, dp_aux);
 
 	if (!aux->aux_switch_node) {
-		DP_AUX_DEBUG(dp_aux, "undefined fsa4480 handle\n");
+		DP_AUX_DEBUG(dp_aux, "undefined aux switch handle\n");
 		rc = -EINVAL;
+		goto end;
+	}
+
+	if (strcmp(aux->aux_switch_node->name, "fsa4480")) {
+		DP_DEBUG("Not an fsa4480 aux switch\n");
 		goto end;
 	}
 
@@ -893,6 +905,7 @@ struct dp_aux *dp_aux_get(struct device *dev, struct dp_catalog_aux *catalog,
 	aux->aux_bridge = aux_bridge;
 	dp_aux = &aux->dp_aux;
 	aux->retry_cnt = 0;
+	dp_aux->dp_cec_feature = parser->dp_cec_feature;
 
 	dp_aux->isr     = dp_aux_isr;
 	dp_aux->init    = dp_aux_init;

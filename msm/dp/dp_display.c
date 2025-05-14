@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2021-2023, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2024, Qualcomm Innovation Center, Inc. All rights reserved.
  * Copyright (c) 2017-2021, The Linux Foundation. All rights reserved.
  */
 
@@ -15,6 +15,7 @@
 #include <linux/jiffies.h>
 #include <linux/pm_qos.h>
 #include <linux/ipc_logging.h>
+#include <linux/usb/usbpd.h>
 
 #include "sde_connector.h"
 
@@ -59,6 +60,8 @@
 #define dp_display_state_remove(x) { \
 	(dp->state &= ~(x)); \
 	dp_display_state_log("remove "#x); }
+
+#define MAX_SUPPORTED_BPP 30
 
 enum dp_display_states {
 	DP_STATE_DISCONNECTED           = 0,
@@ -196,6 +199,7 @@ struct dp_display_private {
 	struct dp_display_mode mode;
 	struct dp_display dp_display;
 	struct msm_drm_private *priv;
+	void *usbpd_handle;
 
 	struct workqueue_struct *wq;
 	struct delayed_work hdcp_cb_work;
@@ -1423,6 +1427,17 @@ static int dp_display_init_aux_switch(struct dp_display_private *dp)
 
 	SDE_EVT32_EXTERNAL(SDE_EVTLOG_FUNC_ENTRY);
 
+	if (!dp->aux_switch_node) {
+		DP_WARN("cannot find aux_switch_node\n");
+		rc = -ENODEV;
+		return rc;
+	}
+
+	if (strcmp(dp->aux_switch_node->name, "fsa4480")) {
+		DP_DEBUG("Not an fsa4480 aux switch\n");
+		return rc;
+	}
+
 	nb.notifier_call = dp_display_aux_switch_callback;
 	nb.priority = 0;
 
@@ -1529,9 +1544,18 @@ static void dp_display_clear_reservation(struct dp_display *dp, struct dp_panel 
 	mutex_unlock(&dp_display->accounting_lock);
 }
 
-static void dp_display_clear_dsc_resources(struct dp_display_private *dp,
+void dp_display_clear_dsc_resources(struct dp_display *dp_display,
 		struct dp_panel *panel)
 {
+	struct dp_display_private *dp;
+
+	if (!dp_display || !panel) {
+		DP_ERR("invalid input\n");
+		return;
+	}
+
+	dp = container_of(dp_display, struct dp_display_private, dp_display);
+
 	dp->tot_dsc_blks_in_use -= panel->dsc_blks_in_use;
 	panel->dsc_blks_in_use = 0;
 }
@@ -1565,7 +1589,7 @@ static void dp_display_stream_disable(struct dp_display_private *dp,
 		return;
 	}
 
-	dp_display_clear_dsc_resources(dp, dp_panel);
+	dp_display_clear_dsc_resources(&dp->dp_display, dp_panel);
 
 	DP_DEBUG("stream_id=%d, active_stream_cnt=%d, tot_dsc_blks_in_use=%d\n",
 			dp_panel->stream_id, dp->active_stream_cnt,
@@ -1637,6 +1661,10 @@ static int dp_display_handle_disconnect(struct dp_display_private *dp, bool skip
 
 	dp_display_host_unready(dp);
 
+	/* clear yuv422_enable flag on each hpd disconnect event
+	 * and let it set based on the required flags on hpd connect.
+	 */
+	dp->dp_display.yuv422_enable = false;
 	dp->tot_lm_blks_in_use = 0;
 
 	mutex_unlock(&dp->session_lock);
@@ -1965,6 +1993,9 @@ static int dp_display_usbpd_attention_cb(struct device *dev)
 		return -ENODEV;
 	}
 
+	if (dp->parser->dp_cec_feature && dp->hpd->hpd_high && dp->hpd->hpd_irq)
+		drm_dp_cec_irq(dp->aux->drm_aux);
+
 	DP_DEBUG("hpd_irq:%d, hpd_high:%d, power_on:%d, is_connected:%d\n",
 			dp->hpd->hpd_irq, dp->hpd->hpd_high,
 			!!dp_display_state_is(DP_STATE_ENABLED),
@@ -2151,6 +2182,7 @@ static int dp_init_sub_modules(struct dp_display_private *dp)
 
 	g_dp_display->is_mst_supported = dp->parser->has_mst;
 	g_dp_display->dsc_cont_pps = dp->parser->dsc_continuous_pps;
+	g_dp_display->is_yuv_supported = dp->parser->yuv422_support;
 
 	dp->catalog = dp_catalog_get(dev, dp->parser);
 	if (IS_ERR(dp->catalog)) {
@@ -2186,6 +2218,7 @@ skip_node_name:
 		dp->aux = NULL;
 		goto error_aux;
 	}
+	dp->aux->connector = dp->dp_display.base_connector;
 
 	rc = dp->aux->drm_aux_register(dp->aux, dp->dp_display.drm_dev);
 	if (rc) {
@@ -2281,6 +2314,7 @@ skip_node_name:
 	cb->configure  = dp_display_usbpd_configure_cb;
 	cb->disconnect = dp_display_usbpd_disconnect_cb;
 	cb->attention  = dp_display_usbpd_attention_cb;
+	cb->usbpd_handle = dp->usbpd_handle;
 
 	dp->hpd = dp_hpd_get(dev, dp->parser, &dp->catalog->hpd,
 			dp->aux_bridge, cb);
@@ -2392,6 +2426,7 @@ static int dp_display_set_mode(struct dp_display *dp_display, void *panel,
 	struct dp_display_private *dp;
 	struct dp_panel *dp_panel;
 	bool dsc_en = (mode->capabilities & DP_PANEL_CAPS_DSC) ? true : false;
+	bool yuv422 = false;
 
 	if (!dp_display || !panel) {
 		DP_ERR("invalid input\n");
@@ -2410,13 +2445,22 @@ static int dp_display_set_mode(struct dp_display *dp_display, void *panel,
 			mode->timing.refresh_rate);
 
 	mutex_lock(&dp->session_lock);
+	dp_panel->output_format = mode->output_format;
+
+	/* Update yuv422 and dsc flags to accurately calculate bpp
+	 * for the mode, based on the selected colorspace.
+	 */
+	if (dp_panel->output_format == DP_OUTPUT_FORMAT_YCBCR422)
+		get_yuv_config(&dsc_en, &yuv422);
+
 	mode->timing.bpp =
 		dp_panel->connector->display_info.bpc * num_components;
 	if (!mode->timing.bpp)
 		mode->timing.bpp = default_bpp;
 
 	mode->timing.bpp = dp->panel->get_mode_bpp(dp->panel,
-			mode->timing.bpp, mode->timing.pixel_clk_khz, dsc_en);
+			mode->timing.bpp, mode->timing.pixel_clk_khz,
+			dsc_en, yuv422);
 
 	dp_panel->pinfo = mode->timing;
 	mutex_unlock(&dp->session_lock);
@@ -3015,6 +3059,40 @@ end:
 	return rc;
 }
 
+static int dp_display_get_dc_support(struct dp_display *dp_display,
+		struct drm_display_mode *mode, u32 out_format)
+{
+	struct dp_display_mode dp_mode;
+	struct dp_display_private *dp = NULL;
+	bool dsc_en = false;
+	bool yuv422 = false;
+
+	if (!dp_display || !mode) {
+		DP_ERR("invalid input");
+		return -EINVAL;
+	}
+
+	dp = container_of(dp_display, struct dp_display_private, dp_display);
+
+	dp_display->convert_to_dp_mode(dp_display, dp->panel, mode, &dp_mode);
+	dsc_en = (dp_mode.capabilities & DP_PANEL_CAPS_DSC) ? true : false;
+
+	/* Fill the dsc and yuv422 flags to accurately calculate
+	 * the bpp for respective colorspace.
+	 * YUV422 doesn't require DSC to be enabled.
+	 */
+	if (out_format & MSM_MODE_FLAG_COLOR_FORMAT_YCBCR422)
+		get_yuv_config(&dsc_en, &yuv422);
+
+	dp_mode.timing.bpp = dp->panel->get_mode_bpp(dp->panel,
+		MAX_SUPPORTED_BPP, dp_mode.timing.pixel_clk_khz, dsc_en, yuv422);
+
+	if (dp_mode.timing.bpp == MAX_SUPPORTED_BPP)
+		return true;
+	else
+		return false;
+}
+
 static enum drm_mode_status dp_display_validate_mode(
 		struct dp_display *dp_display,
 		void *panel, struct drm_display_mode *mode,
@@ -3171,7 +3249,8 @@ static void dp_display_convert_to_dp_mode(struct dp_display *dp_display,
 		dp->tot_dsc_blks_in_use -= dp_panel->dsc_blks_in_use;
 		dp_panel->dsc_blks_in_use = 0;
 
-		if (free_dsc_blks >= required_dsc_blks) {
+		if (free_dsc_blks >= required_dsc_blks &&
+				dp_panel->dsc_en) {
 			dp_mode->capabilities |= DP_PANEL_CAPS_DSC;
 			new_dsc = max(curr_dsc, required_dsc_blks);
 			dp_panel->dsc_blks_in_use = new_dsc;
@@ -3185,6 +3264,7 @@ static void dp_display_convert_to_dp_mode(struct dp_display *dp_display,
 				dp_mode->capabilities);
 	}
 
+	dp_mode->flags = drm_mode->flags;
 	dp_panel->convert_to_dp_mode(dp_panel, drm_mode, dp_mode);
 }
 
@@ -3255,6 +3335,23 @@ static int dp_display_setup_colospace(struct dp_display *dp_display,
 	dp_panel = panel;
 
 	return dp_panel->set_colorspace(dp_panel, colorspace);
+}
+
+static int dp_display_get_display_type(struct dp_display *dp_display,
+		const char **display_type)
+{
+	struct dp_display_private *dp;
+
+	if (!dp_display || !display_type) {
+		pr_err("invalid input\n");
+		return -EINVAL;
+	}
+
+	dp = container_of(dp_display, struct dp_display_private, dp_display);
+
+	*display_type = dp->parser->display_type;
+
+	return 0;
 }
 
 static int dp_display_create_workqueue(struct dp_display_private *dp)
@@ -3665,6 +3762,18 @@ static void dp_display_wakeup_phy_layer(struct dp_display *dp_display,
 		hpd->wakeup_phy(hpd, wakeup);
 }
 
+static void *dp_display_usbpd_get_handle(struct dp_display_private *dp)
+{
+	struct device *dev = &dp->pdev->dev;
+
+	if (!dev || !dev->of_node) {
+		DP_ERR("cannot find dev.of_node\n");
+		return ERR_PTR(-ENODEV);
+	}
+
+	return dp_hpd_get_handle(dev);
+}
+
 static int dp_display_probe(struct platform_device *pdev)
 {
 	int rc = 0;
@@ -3694,6 +3803,13 @@ static int dp_display_probe(struct platform_device *pdev)
 	if (rc)
 		goto error;
 
+	dp->usbpd_handle = dp_display_usbpd_get_handle(dp);
+	if (IS_ERR(dp->usbpd_handle)) {
+		DP_ERR("Failed to get usbpd handle\n");
+		rc = PTR_ERR(dp->usbpd_handle);
+		goto error;
+	}
+
 	rc = dp_display_create_workqueue(dp);
 	if (rc) {
 		DP_ERR("Failed to create workqueue\n");
@@ -3715,6 +3831,7 @@ static int dp_display_probe(struct platform_device *pdev)
 	g_dp_display->set_mode      = dp_display_set_mode;
 	g_dp_display->validate_mode = dp_display_validate_mode;
 	g_dp_display->get_modes     = dp_display_get_modes;
+	g_dp_display->get_dc_support = dp_display_get_dc_support;
 	g_dp_display->prepare       = dp_display_prepare;
 	g_dp_display->unprepare     = dp_display_unprepare;
 	g_dp_display->request_irq   = dp_request_irq;
@@ -3743,6 +3860,8 @@ static int dp_display_probe(struct platform_device *pdev)
 	g_dp_display->get_available_dp_resources =
 					dp_display_get_available_dp_resources;
 	g_dp_display->clear_reservation = dp_display_clear_reservation;
+
+	g_dp_display->get_display_type = dp_display_get_display_type;
 
 	rc = component_add(&pdev->dev, &dp_display_comp_ops);
 	if (rc) {

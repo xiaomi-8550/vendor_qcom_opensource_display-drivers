@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+KDIR := $(TOP)/kernel_platform/msm-kernel
+
+ifeq ($(CONFIG_ARCH_KONA), y)
+	include $(DISPLAY_ROOT)/config/konadisp.conf
+	LINUX_INC +=    -include $(DISPLAY_ROOT)/config/konadispconf.h
+endif
+
+ifeq ($(CONFIG_ARCH_KALAMA), y)
+        include $(DISPLAY_ROOT)/config/gki_kalamadisp.conf
+        LINUX_INC +=    -include $(DISPLAY_ROOT)/config/gki_kalamadispconf.h
+endif
+
+ifeq ($(CONFIG_ARCH_SDM670), y)
+	include $(DISPLAY_ROOT)/config/qcs605disp.conf
+	LINUX_INC +=    -include $(DISPLAY_ROOT)/config/qcs605dispconf.h
+endif
+
+ccflags-y += $(LINUX_INC)
+
+obj-$(CONFIG_DRM_LT9611UXC) += lt9611uxc.o
+
+WINGMATE_OBJS += wingmate/wm_audio.o \
+		 wingmate/wm_cec.o \
+		 wingmate/wm_debug.o \
+		 wingmate/wm_display.o \
+		 wingmate/wm_drm.o \
+		 wingmate/wm_dsi_rx.o \
+		 wingmate/wm_hdcp.o \
+		 wingmate/wm_hdmi_tx.o \
+		 wingmate/wm_pll.o \
+		 wingmate/wm_vtg.o
+
+obj-$(CONFIG_DRM_WINGMATE) += wm_display.o
+wm_display-y := $(WINGMATE_OBJS)
+
+CDEFINES += -DBUILD_TIMESTAMP=\"$(shell date -u +'%Y-%m-%dT%H:%M:%SZ')\"

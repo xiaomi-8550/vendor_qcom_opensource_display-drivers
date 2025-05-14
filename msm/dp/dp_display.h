@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Copyright (c) 2021-2022, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2024, Qualcomm Innovation Center, Inc. All rights reserved.
  * Copyright (c) 2017-2021, The Linux Foundation. All rights reserved.
  */
 
@@ -46,6 +46,9 @@ struct dp_display {
 	bool is_sst_connected;
 	bool is_mst_supported;
 	bool dsc_cont_pps;
+	bool is_connected;
+	bool is_yuv_supported;
+	bool yuv422_enable;
 	u32 max_pclk_khz;
 	void *dp_mst_prv_info;
 	u32 max_mixer_count;
@@ -65,6 +68,8 @@ struct dp_display {
 			const struct msm_resource_caps_info *avail_res);
 	int (*get_modes)(struct dp_display *dp_display, void *panel,
 		struct dp_display_mode *dp_mode);
+	int (*get_dc_support)(struct dp_display *dp,
+		struct drm_display_mode *mode, u32 out_format);
 	int (*prepare)(struct dp_display *dp_display, void *panel);
 	int (*unprepare)(struct dp_display *dp_display, void *panel);
 	int (*request_irq)(struct dp_display *dp_display);
@@ -106,6 +111,8 @@ struct dp_display {
 			const struct msm_resource_caps_info *avail_res,
 			struct msm_resource_caps_info *max_dp_avail_res);
 	void (*clear_reservation)(struct dp_display *dp, struct dp_panel *panel);
+	int (*get_display_type)(struct dp_display *dp_display,
+			const char **display_type);
 };
 
 void *get_ipc_log_context(void);
@@ -115,6 +122,8 @@ int dp_display_get_num_of_displays(void);
 int dp_display_get_displays(void **displays, int count);
 int dp_display_get_num_of_streams(void);
 int dp_display_mmrm_callback(struct mmrm_client_notifier_data *notifier_data);
+bool dp_connector_mode_needs_full_range(void *display);
+void dp_display_clear_dsc_resources(struct dp_display *dp_display, struct dp_panel *panel);
 #else
 static inline int dp_display_get_num_of_displays(void)
 {
@@ -136,6 +145,14 @@ static inline int dp_connector_update_pps(struct drm_connector *connector,
 static inline int dp_display_mmrm_callback(struct mmrm_client_notifier_data *notifier_data)
 {
 	return 0;
+}
+static inline void dp_display_clear_dsc_resources(struct dp_display *dp_display,
+		struct dp_panel *panel)
+{
+}
+static inline bool dp_connector_mode_needs_full_range(void *display)
+{
+	return false;
 }
 #endif /* CONFIG_DRM_MSM_DP */
 #endif /* _DP_DISPLAY_H_ */
